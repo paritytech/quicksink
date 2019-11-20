@@ -31,6 +31,7 @@
 
 use futures_core::ready;
 use futures_sink::Sink;
+use pin_project_lite::pin_project;
 use std::{future::Future, pin::Pin, task::{Context, Poll}};
 
 /// Returns a `Sink` impl based on the initial value and the given closure.
@@ -86,47 +87,18 @@ enum State {
     Closed
 }
 
-/// `SinkImpl` implements the `Sink` trait.
-#[derive(Debug)]
-pub struct SinkImpl<S, F, T, A, E> {
-    lambda: F,
-    future: Option<T>,
-    param: Option<S>,
-    state: State,
-    _mark: std::marker::PhantomData<(A, E)>
-}
-
-impl<S, F, T, A, E> SinkImpl<S, F, T, A, E> {
-    /// Project the closure from the pinned struct.
-    fn lambda(self: Pin<&mut Self>) -> &mut F {
-        unsafe {
-            &mut self.get_unchecked_mut().lambda
-        }
-    }
-
-    /// Pin-project the future from the pinned struct.
-    fn future(self: Pin<&mut Self>) -> Pin<&mut Option<T>> {
-        unsafe {
-            self.map_unchecked_mut(|s| &mut s.future)
-        }
-    }
-
-    /// Project the closure's state value from the pinned struct.
-    fn param(self: Pin<&mut Self>) -> &mut Option<S> {
-        unsafe {
-            &mut self.get_unchecked_mut().param
-        }
-    }
-
-    /// Project the state from the pinned struct.
-    fn state(self: Pin<&mut Self>) -> &mut State {
-        unsafe {
-            &mut self.get_unchecked_mut().state
-        }
+pin_project!
+{
+    /// `SinkImpl` implements the `Sink` trait.
+    #[derive(Debug)]
+    pub struct SinkImpl<S, F, T, A, E> {
+        lambda: F,
+        #[pin] future: Option<T>,
+        param: Option<S>,
+        state: State,
+        _mark: std::marker::PhantomData<(A, E)>
     }
 }
-
-impl<S, F, T: Unpin, A, E> Unpin for SinkImpl<S, F, T, A, E> {}
 
 impl<S, F, T, A, E> Sink<A> for SinkImpl<S, F, T, A, E>
 where
@@ -135,23 +107,24 @@ where
 {
     type Error = E;
 
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        match self.as_mut().state() {
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        let this = self.project();
+        match this.state {
             State::Sending | State::Flushing => {
-                match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                     Ok(p) => {
-                        *self.as_mut().param() = Some(p);
-                        *self.as_mut().state() = State::Empty;
+                        *this.param = Some(p);
+                        *this.state = State::Empty;
                         Poll::Ready(Ok(()))
                     }
                     Err(e) => Poll::Ready(Err(e))
                 }
             }
             State::Closing => {
-                match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                     Ok(p) => {
-                        *self.as_mut().param() = Some(p);
-                        *self.as_mut().state() = State::Closed;
+                        *this.param = Some(p);
+                        *this.state = State::Closed;
                         Poll::Ready(Ok(()))
                     }
                     Err(e) => Poll::Ready(Err(e))
@@ -161,49 +134,51 @@ where
         }
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: A) -> Result<(), Self::Error> {
-        assert_eq!(State::Empty, *self.as_mut().state());
-        if let Some(p) = self.as_mut().param().take() {
-            let future = (self.as_mut().lambda())(p, Action::Send(item));
-            self.as_mut().future().set(Some(future));
-            *self.as_mut().state() = State::Sending
+    fn start_send(self: Pin<&mut Self>, item: A) -> Result<(), Self::Error> {
+        let mut this = self.project();
+        assert_eq!(State::Empty, *this.state);
+        if let Some(p) = this.param.take() {
+            let future = (this.lambda)(p, Action::Send(item));
+            this.future.set(Some(future));
+            *this.state = State::Sending
         }
         Ok(())
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         loop {
-            match self.as_mut().state() {
+            let mut this = self.as_mut().project();
+            match this.state {
                 State::Empty =>
-                    if let Some(p) = self.as_mut().param().take() {
-                        let future = (self.as_mut().lambda())(p, Action::Flush);
-                        self.as_mut().future().set(Some(future));
-                        *self.as_mut().state() = State::Flushing
+                    if let Some(p) = this.param.take() {
+                        let future = (this.lambda)(p, Action::Flush);
+                        this.future.set(Some(future));
+                        *this.state = State::Flushing
                     } else {
                         return Poll::Ready(Ok(()))
                     }
                 State::Sending =>
-                    match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
-                            *self.as_mut().param() = Some(p);
-                            *self.as_mut().state() = State::Empty
+                            *this.param = Some(p);
+                            *this.state = State::Empty
                         }
                         Err(e) => return Poll::Ready(Err(e))
                     }
                 State::Flushing =>
-                    match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
-                            *self.as_mut().param() = Some(p);
-                            *self.as_mut().state() = State::Empty;
+                            *this.param = Some(p);
+                            *this.state = State::Empty;
                             return Poll::Ready(Ok(()))
                         }
                         Err(e) => return Poll::Ready(Err(e))
                     }
                 State::Closing =>
-                    match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
-                            *self.as_mut().param() = Some(p);
-                            *self.as_mut().state() = State::Closed;
+                            *this.param = Some(p);
+                            *this.state = State::Closed;
                             return Poll::Ready(Ok(()))
                         }
                         Err(e) => return Poll::Ready(Err(e))
@@ -215,36 +190,37 @@ where
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         loop {
-            match self.as_mut().state() {
+            let mut this = self.as_mut().project();
+            match this.state {
                 State::Empty =>
-                    if let Some(p) = self.as_mut().param().take() {
-                        let future = (self.as_mut().lambda())(p, Action::Close);
-                        self.as_mut().future().set(Some(future));
-                        *self.as_mut().state() = State::Closing;
+                    if let Some(p) = this.param.take() {
+                        let future = (this.lambda)(p, Action::Close);
+                        this.future.set(Some(future));
+                        *this.state = State::Closing;
                     } else {
                         return Poll::Ready(Ok(()))
                     }
                 State::Sending =>
-                    match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
-                            *self.as_mut().param() = Some(p);
-                            *self.as_mut().state() = State::Empty
+                            *this.param = Some(p);
+                            *this.state = State::Empty
                         }
                         Err(e) => return Poll::Ready(Err(e))
                     }
                 State::Flushing =>
-                    match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
-                            *self.as_mut().param() = Some(p);
-                            *self.as_mut().state() = State::Empty
+                            *this.param = Some(p);
+                            *this.state = State::Empty
                         }
                         Err(e) => return Poll::Ready(Err(e))
                     }
                 State::Closing =>
-                    match ready!(self.as_mut().future().as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
-                            *self.as_mut().param() = Some(p);
-                            *self.as_mut().state() = State::Closed;
+                            *this.param = Some(p);
+                            *this.state = State::Closed;
                             return Poll::Ready(Ok(()))
                         }
                         Err(e) => return Poll::Ready(Err(e))
