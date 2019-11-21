@@ -14,7 +14,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```no_run
 //! use async_std::io;
 //! use futures::prelude::*;
 //! use quicksink::Action;
@@ -59,7 +59,7 @@ where
 /// Presumably the closure encapsulates a resource to perform I/O. The commands
 /// correspond to methods of the [`Sink`] trait and provide the closure with
 /// sufficient information to know what kind of action to perform with it.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action<A> {
     /// Send the given value.
     /// Corresponds to [`Sink::start_send`].
@@ -234,24 +234,59 @@ where
 #[cfg(test)]
 mod tests {
     use async_std::{io, task};
-    use futures::{prelude::*, stream};
+    use futures::{channel::mpsc, prelude::*, stream};
     use crate::{Action, make_sink};
 
     #[test]
     fn smoke_test() {
-        let sink = make_sink(io::stdout(), |mut stdout, action| async move {
-            match action {
-                Action::Send(x) => stdout.write_all(x).await?,
-                Action::Flush => stdout.flush().await?,
-                Action::Close => stdout.close().await?
-            }
-            Ok::<_, io::Error>(stdout)
-        });
+        task::block_on(async {
+            let sink = make_sink(io::stdout(), |mut stdout, action| async move {
+                match action {
+                    Action::Send(x) => stdout.write_all(x).await?,
+                    Action::Flush => stdout.flush().await?,
+                    Action::Close => stdout.close().await?
+                }
+                Ok::<_, io::Error>(stdout)
+            });
 
-        task::block_on(async move {
             let values = vec![Ok(&b"hello\n"[..]), Ok(&b"world\n"[..])];
             assert!(stream::iter(values).forward(sink).await.is_ok())
         })
+    }
+
+    #[test]
+    fn replay() {
+        task::block_on(async {
+            let (tx, rx) = mpsc::unbounded();
+
+            let sink = make_sink(tx, |mut tx, action| async move {
+                tx.send(action.clone()).await?;
+                if action == Action::Close {
+                    tx.close().await?
+                }
+                Ok::<_, mpsc::SendError>(tx)
+            });
+
+            futures::pin_mut!(sink);
+
+            let expected = [
+                Action::Send("hello\n"),
+                Action::Flush,
+                Action::Send("world\n"),
+                Action::Flush,
+                Action::Close
+            ];
+
+            for &item in &["hello\n", "world\n"] {
+                sink.send(item).await.unwrap()
+            }
+
+            sink.close().await.unwrap();
+
+            let actual = rx.collect::<Vec<_>>().await;
+
+            assert_eq!(&expected[..], &actual[..])
+        });
     }
 }
 
