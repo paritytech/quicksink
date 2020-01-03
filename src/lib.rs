@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Parity Technologies (UK) Ltd.
+// Copyright (c) 2019-2020 Parity Technologies (UK) Ltd.
 //
 // Licensed under the Apache License, Version 2.0
 // <LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0> or the MIT
@@ -11,6 +11,14 @@
 //!
 //! This is very similar to how `futures::stream::unfold` creates a `Stream`
 //! implementation from a seed value and a future-returning closure.
+//!
+//! # Error behaviour
+//!
+//! If any of the [`Sink`] methods produces an error, the sink transitions to
+//! a closed state. Invoking [`Sink::poll_ready`] or [`Sink::start_send`]
+//! again after an error has occured will cause a *panic*. Invoking
+//! [`Sink::poll_flush`] or [`Sink::poll_close`] after an error will have no
+//! effect.
 //!
 //! # Examples
 //!
@@ -117,7 +125,10 @@ where
                         *this.state = State::Empty;
                         Poll::Ready(Ok(()))
                     }
-                    Err(e) => Poll::Ready(Err(e))
+                    Err(e) => {
+                        *this.state = State::Closed;
+                        Poll::Ready(Err(e))
+                    }
                 }
             }
             State::Closing => {
@@ -127,21 +138,27 @@ where
                         *this.state = State::Closed;
                         Poll::Ready(Ok(()))
                     }
-                    Err(e) => Poll::Ready(Err(e))
+                    Err(e) => {
+                        *this.state = State::Closed;
+                        Poll::Ready(Err(e))
+                    }
                 }
             }
-            State::Empty | State::Closed => Poll::Ready(Ok(()))
+            State::Empty => {
+                assert!(this.param.is_some());
+                Poll::Ready(Ok(()))
+            }
+            State::Closed => panic!("Sink::poll_ready applied to a closed sink.")
         }
     }
 
     fn start_send(self: Pin<&mut Self>, item: A) -> Result<(), Self::Error> {
+        assert_eq!(State::Empty, self.state);
         let mut this = self.project();
-        assert_eq!(State::Empty, *this.state);
-        if let Some(p) = this.param.take() {
-            let future = (this.lambda)(p, Action::Send(item));
-            this.future.set(Some(future));
-            *this.state = State::Sending
-        }
+        let param = this.param.take().unwrap();
+        let future = (this.lambda)(param, Action::Send(item));
+        this.future.set(Some(future));
+        *this.state = State::Sending;
         Ok(())
     }
 
@@ -163,7 +180,10 @@ where
                             *this.param = Some(p);
                             *this.state = State::Empty
                         }
-                        Err(e) => return Poll::Ready(Err(e))
+                        Err(e) => {
+                            *this.state = State::Closed;
+                            return Poll::Ready(Err(e))
+                        }
                     }
                 State::Flushing =>
                     match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
@@ -172,7 +192,10 @@ where
                             *this.state = State::Empty;
                             return Poll::Ready(Ok(()))
                         }
-                        Err(e) => return Poll::Ready(Err(e))
+                        Err(e) => {
+                            *this.state = State::Closed;
+                            return Poll::Ready(Err(e))
+                        }
                     }
                 State::Closing =>
                     match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
@@ -181,7 +204,10 @@ where
                             *this.state = State::Closed;
                             return Poll::Ready(Ok(()))
                         }
-                        Err(e) => return Poll::Ready(Err(e))
+                        Err(e) => {
+                            *this.state = State::Closed;
+                            return Poll::Ready(Err(e))
+                        }
                     }
                 State::Closed => return Poll::Ready(Ok(()))
             }
@@ -206,7 +232,10 @@ where
                             *this.param = Some(p);
                             *this.state = State::Empty
                         }
-                        Err(e) => return Poll::Ready(Err(e))
+                        Err(e) => {
+                            *this.state = State::Closed;
+                            return Poll::Ready(Err(e))
+                        }
                     }
                 State::Flushing =>
                     match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
@@ -214,7 +243,10 @@ where
                             *this.param = Some(p);
                             *this.state = State::Empty
                         }
-                        Err(e) => return Poll::Ready(Err(e))
+                        Err(e) => {
+                            *this.state = State::Closed;
+                            return Poll::Ready(Err(e))
+                        }
                     }
                 State::Closing =>
                     match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
@@ -223,7 +255,10 @@ where
                             *this.state = State::Closed;
                             return Poll::Ready(Ok(()))
                         }
-                        Err(e) => return Poll::Ready(Err(e))
+                        Err(e) => {
+                            *this.state = State::Closed;
+                            return Poll::Ready(Err(e))
+                        }
                     }
                 State::Closed => return Poll::Ready(Ok(()))
             }
