@@ -16,7 +16,7 @@
 //!
 //! If any of the [`Sink`] methods produce an error, the sink transitions to
 //! a closed state. Invoking [`Sink::poll_ready`] or [`Sink::start_send`]
-//! again after an error has occured will cause a *panic*. Invoking
+//! on a sink in closed state will cause a *panic*. Invoking
 //! [`Sink::poll_flush`] or [`Sink::poll_close`] after an error will have no
 //! effect.
 //!
