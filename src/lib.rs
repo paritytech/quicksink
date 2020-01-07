@@ -14,7 +14,7 @@
 //!
 //! # Error behaviour
 //!
-//! If any of the [`Sink`] methods produces an error, the sink transitions to
+//! If any of the [`Sink`] methods produce an error, the sink transitions to
 //! a closed state. Invoking [`Sink::poll_ready`] or [`Sink::start_send`]
 //! again after an error has occured will cause a *panic*. Invoking
 //! [`Sink::poll_flush`] or [`Sink::poll_close`] after an error will have no
@@ -324,4 +324,3 @@ mod tests {
         });
     }
 }
-
