@@ -40,7 +40,13 @@
 use futures_core::ready;
 use futures_sink::Sink;
 use pin_project_lite::pin_project;
-use std::{future::Future, pin::Pin, task::{Context, Poll}};
+use std::{
+    fmt::{self, Display, Formatter},
+    error,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll}
+};
 
 /// Returns a `Sink` impl based on the initial value and the given closure.
 ///
@@ -113,7 +119,7 @@ where
     F: FnMut(S, Action<A>) -> T,
     T: Future<Output = Result<S, E>>
 {
-    type Error = E;
+    type Error = Error<E>;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         let this = self.project();
@@ -127,7 +133,7 @@ where
                     }
                     Err(e) => {
                         *this.state = State::Closed;
-                        Poll::Ready(Err(e))
+                        Poll::Ready(Err(Error::Inner(e)))
                     }
                 }
             }
@@ -136,11 +142,11 @@ where
                     Ok(p) => {
                         *this.param = Some(p);
                         *this.state = State::Closed;
-                        Poll::Ready(Ok(()))
+                        Poll::Ready(Err(Error::Closed))
                     }
                     Err(e) => {
                         *this.state = State::Closed;
-                        Poll::Ready(Err(e))
+                        Poll::Ready(Err(Error::Inner(e)))
                     }
                 }
             }
@@ -148,7 +154,7 @@ where
                 assert!(this.param.is_some());
                 Poll::Ready(Ok(()))
             }
-            State::Closed => panic!("Sink::poll_ready applied to a closed sink.")
+            State::Closed => Poll::Ready(Err(Error::Closed))
         }
     }
 
@@ -182,7 +188,7 @@ where
                         }
                         Err(e) => {
                             *this.state = State::Closed;
-                            return Poll::Ready(Err(e))
+                            return Poll::Ready(Err(Error::Inner(e)))
                         }
                     }
                 State::Flushing =>
@@ -194,7 +200,7 @@ where
                         }
                         Err(e) => {
                             *this.state = State::Closed;
-                            return Poll::Ready(Err(e))
+                            return Poll::Ready(Err(Error::Inner(e)))
                         }
                     }
                 State::Closing =>
@@ -206,7 +212,7 @@ where
                         }
                         Err(e) => {
                             *this.state = State::Closed;
-                            return Poll::Ready(Err(e))
+                            return Poll::Ready(Err(Error::Inner(e)))
                         }
                     }
                 State::Closed => return Poll::Ready(Ok(()))
@@ -234,7 +240,7 @@ where
                         }
                         Err(e) => {
                             *this.state = State::Closed;
-                            return Poll::Ready(Err(e))
+                            return Poll::Ready(Err(Error::Inner(e)))
                         }
                     }
                 State::Flushing =>
@@ -245,7 +251,7 @@ where
                         }
                         Err(e) => {
                             *this.state = State::Closed;
-                            return Poll::Ready(Err(e))
+                            return Poll::Ready(Err(Error::Inner(e)))
                         }
                     }
                 State::Closing =>
@@ -257,11 +263,67 @@ where
                         }
                         Err(e) => {
                             *this.state = State::Closed;
-                            return Poll::Ready(Err(e))
+                            return Poll::Ready(Err(Error::Inner(e)))
                         }
                     }
                 State::Closed => return Poll::Ready(Ok(()))
             }
+        }
+    }
+}
+
+/// Possible errors of [`SinkImpl`].
+#[derive(Debug, Clone)]
+pub enum Error<E> {
+    /// Error caused by the underlying future.
+    Inner(E),
+    /// An operation on a closed sink has been attempted.
+    Closed
+}
+
+impl<E> Error<E> {
+    /// Predicate to check for the `Closed` error case.
+    pub fn is_closed(&self) -> bool {
+        if let Error::Closed = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Predicate to check for the `Inner` error case.
+    pub fn is_inner(&self) -> bool {
+        if let Error::Inner(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return the inner error if any.
+    pub fn into_inner(self) -> Option<E> {
+        if let Error::Inner(e) = self {
+            Some(e)
+        } else {
+            None
+        }
+    }
+}
+
+impl<E: Display> Display for Error<E> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Error::Inner(e) => e.fmt(f),
+            Error::Closed => f.write_str("sink is closed")
+        }
+    }
+}
+
+impl<E: error::Error + 'static> error::Error for Error<E> {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Error::Inner(e) => Some(e),
+            Error::Closed => None
         }
     }
 }
