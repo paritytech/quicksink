@@ -1,6 +1,7 @@
-# 0.2.0
+# 0.1.2
 
-`SinkImpl` now has its own error type (#4).
+Drop futures after they have resolved. Add another internal state to
+better distinguish failures from ordinary closures.
 
 # 0.1.1
 
