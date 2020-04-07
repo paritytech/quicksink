@@ -1,6 +1,6 @@
 [package]
 name = "quicksink"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Parity Technologies <admin@parity.io>"]
 description = "Create a Sink from some value and a closure returning a Future."
 keywords = ["async", "futures", "sink"]

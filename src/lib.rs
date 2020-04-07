@@ -12,14 +12,6 @@
 //! This is very similar to how `futures::stream::unfold` creates a `Stream`
 //! implementation from a seed value and a future-returning closure.
 //!
-//! # Error behaviour
-//!
-//! If any of the [`Sink`] methods produce an error, the sink transitions to
-//! a closed state. Invoking [`Sink::poll_ready`] or [`Sink::start_send`]
-//! on a sink in closed state will cause a *panic*. Invoking
-//! [`Sink::poll_flush`] or [`Sink::poll_close`] after an error will have no
-//! effect.
-//!
 //! # Examples
 //!
 //! ```no_run
@@ -36,6 +28,15 @@
 //!     Ok::<_, io::Error>(stdout)
 //! });
 //! ```
+//!
+//! # Panics
+//!
+//! - If any of the [`Sink`] methods produce an error, the sink transitions
+//! to a failure state and none of its methods must be called afterwards or
+//! else a panic will occur.
+//! - If [`Sink::poll_close`] has been called, no other sink method must be
+//! called afterwards or else a panic will be caused.
+//!
 
 use futures_core::ready;
 use futures_sink::Sink;
@@ -92,7 +93,9 @@ enum State {
     /// The `Sink` is closing its resource.
     Closing,
     /// The `Sink` is closed (terminal state).
-    Closed
+    Closed,
+    /// The `Sink` experienced an error (terminal state).
+    Failed
 }
 
 pin_project!
@@ -116,30 +119,33 @@ where
     type Error = E;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        let this = self.project();
+        let mut this = self.project();
         match this.state {
             State::Sending | State::Flushing => {
-                match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
+                match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
                     Ok(p) => {
+                        this.future.set(None);
                         *this.param = Some(p);
                         *this.state = State::Empty;
                         Poll::Ready(Ok(()))
                     }
                     Err(e) => {
-                        *this.state = State::Closed;
+                        this.future.set(None);
+                        *this.state = State::Failed;
                         Poll::Ready(Err(e))
                     }
                 }
             }
             State::Closing => {
-                match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
-                    Ok(p) => {
-                        *this.param = Some(p);
+                match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
+                    Ok(_) => {
+                        this.future.set(None);
                         *this.state = State::Closed;
-                        Poll::Ready(Ok(()))
+                        panic!("SinkImpl::poll_ready called on a closing sink.")
                     }
                     Err(e) => {
-                        *this.state = State::Closed;
+                        this.future.set(None);
+                        *this.state = State::Failed;
                         Poll::Ready(Err(e))
                     }
                 }
@@ -148,7 +154,8 @@ where
                 assert!(this.param.is_some());
                 Poll::Ready(Ok(()))
             }
-            State::Closed => panic!("Sink::poll_ready applied to a closed sink.")
+            State::Closed => panic!("SinkImpl::poll_ready called on a closed sink."),
+            State::Failed => panic!("SinkImpl::poll_ready called after error.")
         }
     }
 
@@ -175,41 +182,47 @@ where
                         return Poll::Ready(Ok(()))
                     }
                 State::Sending =>
-                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
+                            this.future.set(None);
                             *this.param = Some(p);
                             *this.state = State::Empty
                         }
                         Err(e) => {
-                            *this.state = State::Closed;
+                            this.future.set(None);
+                            *this.state = State::Failed;
                             return Poll::Ready(Err(e))
                         }
                     }
                 State::Flushing =>
-                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
+                            this.future.set(None);
                             *this.param = Some(p);
                             *this.state = State::Empty;
                             return Poll::Ready(Ok(()))
                         }
                         Err(e) => {
-                            *this.state = State::Closed;
+                            this.future.set(None);
+                            *this.state = State::Failed;
                             return Poll::Ready(Err(e))
                         }
                     }
                 State::Closing =>
-                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
-                        Ok(p) => {
-                            *this.param = Some(p);
+                    match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
+                        Ok(_) => {
+                            this.future.set(None);
                             *this.state = State::Closed;
                             return Poll::Ready(Ok(()))
                         }
                         Err(e) => {
-                            *this.state = State::Closed;
+                            this.future.set(None);
+                            *this.state = State::Failed;
                             return Poll::Ready(Err(e))
                         }
                     }
-                State::Closed => return Poll::Ready(Ok(()))
+                State::Closed => return Poll::Ready(Ok(())),
+                State::Failed => panic!("SinkImpl::poll_flush called after error.")
             }
         }
     }
@@ -227,40 +240,46 @@ where
                         return Poll::Ready(Ok(()))
                     }
                 State::Sending =>
-                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
+                            this.future.set(None);
                             *this.param = Some(p);
                             *this.state = State::Empty
                         }
                         Err(e) => {
-                            *this.state = State::Closed;
+                            this.future.set(None);
+                            *this.state = State::Failed;
                             return Poll::Ready(Err(e))
                         }
                     }
                 State::Flushing =>
-                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
+                    match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
                         Ok(p) => {
+                            this.future.set(None);
                             *this.param = Some(p);
                             *this.state = State::Empty
                         }
                         Err(e) => {
-                            *this.state = State::Closed;
+                            this.future.set(None);
+                            *this.state = State::Failed;
                             return Poll::Ready(Err(e))
                         }
                     }
                 State::Closing =>
-                    match ready!(this.future.as_pin_mut().unwrap().poll(cx)) {
-                        Ok(p) => {
-                            *this.param = Some(p);
+                    match ready!(this.future.as_mut().as_pin_mut().unwrap().poll(cx)) {
+                        Ok(_) => {
+                            this.future.set(None);
                             *this.state = State::Closed;
                             return Poll::Ready(Ok(()))
                         }
                         Err(e) => {
-                            *this.state = State::Closed;
+                            this.future.set(None);
+                            *this.state = State::Failed;
                             return Poll::Ready(Err(e))
                         }
                     }
-                State::Closed => return Poll::Ready(Ok(()))
+                State::Closed => return Poll::Ready(Ok(())),
+                State::Failed => panic!("SinkImpl::poll_closed called after error.")
             }
         }
     }
